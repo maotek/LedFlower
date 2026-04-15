@@ -22,6 +22,9 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 static const int BUTTON_PIN_1 = 1;
 static const int BUTTON_PIN_2 = 2;
 static const uint8_t LED_BRIGHTNESS = 255;
+static const uint8_t STATIC_MODE_COUNT = 7;
+static const uint8_t EFFECT_MODE_COUNT = 5;
+static const uint8_t MODE_COUNT = STATIC_MODE_COUNT + EFFECT_MODE_COUNT;
 
 const char *daysOfTheWeek[7] = {
     "Zondag", "Maandag", "Dinsdag", "Woensdag",
@@ -29,7 +32,7 @@ const char *daysOfTheWeek[7] = {
 };
 
 // Set to 1 when the RTC module is connected.
-#define USE_RTC 0
+#define USE_RTC 1
 
 #if LV_USE_LOG != 0
 void my_print(lv_log_level_t level, const char *buf)
@@ -56,12 +59,45 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     lv_display_flush_ready(disp);
 }
 
+static uint32_t color_wheel(uint8_t pos)
+{
+    pos = 255 - pos;
+    if (pos < 85) {
+        return strip.Color(255 - pos * 3, 0, pos * 3);
+    }
+    if (pos < 170) {
+        pos -= 85;
+        return strip.Color(0, pos * 3, 255 - pos * 3);
+    }
+    pos -= 170;
+    return strip.Color(pos * 3, 255 - pos * 3, 0);
+}
+
+static uint32_t scale_color(uint32_t color, uint8_t scale)
+{
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    r = (uint16_t)r * scale / 255;
+    g = (uint16_t)g * scale / 255;
+    b = (uint16_t)b * scale / 255;
+    return strip.Color(r, g, b);
+}
+
+static void fill_all(uint32_t color)
+{
+    for (uint16_t i = 0; i < strip.numPixels(); i++) {
+        strip.setPixelColor(i, color);
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
     Wire.begin(8, 9);
     pinMode(BUTTON_PIN_1, INPUT_PULLUP);
     pinMode(BUTTON_PIN_2, INPUT_PULLUP);
+    randomSeed((uint32_t)micros());
 
 #if USE_RTC
     if (!rtc.begin()) {
@@ -127,16 +163,19 @@ void loop()
     /* Let EEZ Flow / EEZ runtime run */
     ui_tick();
 
-    // Button 1 toggles LEDs on/off; Button 2 cycles color on press
+    // Button 1 toggles LEDs on/off; Button 2 cycles mode on press
     static bool leds_on = false;
-    static uint8_t color_index = 0;
+    static uint8_t mode_index = 0;
     static bool last_leds_on = false;
-    static uint8_t last_color_index = 0;
+    static uint8_t last_mode_index = 0;
+    static uint32_t last_anim_ms = 0;
+    static uint16_t anim_step = 0;
     static int last_btn1 = HIGH;
     static int last_btn2 = HIGH;
     static uint32_t last_btn1_ms = 0;
     static uint32_t last_btn2_ms = 0;
     const uint32_t debounce_ms = 200;
+    const uint32_t anim_interval_ms = 20;
 
     int btn1 = digitalRead(BUTTON_PIN_1);
     int btn2 = digitalRead(BUTTON_PIN_2);
@@ -146,36 +185,98 @@ void loop()
         last_btn1_ms = nowMs;
     }
     if (last_btn2 == HIGH && btn2 == LOW && (nowMs - last_btn2_ms) > debounce_ms) {
-        color_index = (color_index + 1) % 7;
+        mode_index = (mode_index + 1) % MODE_COUNT;
         last_btn2_ms = nowMs;
     }
     last_btn1 = btn1;
     last_btn2 = btn2;
 
-    uint32_t color = 0;
-    switch (color_index) {
-        case 0: color = strip.Color(255, 0, 0); break;     // red
-        case 1: color = strip.Color(0, 255, 0); break;     // green
-        case 2: color = strip.Color(0, 0, 255); break;     // blue
-        case 3: color = strip.Color(255, 255, 255); break; // white
-        case 4: color = strip.Color(255, 255, 0); break;   // yellow
-        case 5: color = strip.Color(0, 255, 255); break;   // cyan
-        default: color = strip.Color(255, 0, 255); break;  // magenta
+    if (mode_index != last_mode_index) {
+        anim_step = 0;
+        last_anim_ms = 0;
     }
 
-    bool need_update = (leds_on != last_leds_on) || (color_index != last_color_index);
-    if (need_update) {
-        if (leds_on) {
-            for (uint16_t i = 0; i < strip.numPixels(); i++) {
-                strip.setPixelColor(i, color);
-            }
-        } else {
+    if (!leds_on) {
+        if (last_leds_on) {
             strip.clear();
+            strip.show();
         }
-        strip.show();
-        last_leds_on = leds_on;
-        last_color_index = color_index;
+    } else if (mode_index < STATIC_MODE_COUNT) {
+        if (!last_leds_on || (mode_index != last_mode_index)) {
+            uint32_t color = 0;
+            switch (mode_index) {
+                case 0: color = strip.Color(255, 0, 0); break;     // red
+                case 1: color = strip.Color(0, 255, 0); break;     // green
+                case 2: color = strip.Color(0, 0, 255); break;     // blue
+                case 3: color = strip.Color(255, 255, 255); break; // white
+                case 4: color = strip.Color(255, 255, 0); break;   // yellow
+                case 5: color = strip.Color(0, 255, 255); break;   // cyan
+                default: color = strip.Color(255, 0, 255); break;  // magenta
+            }
+            fill_all(color);
+            strip.show();
+        }
+    } else {
+        bool anim_due = (nowMs - last_anim_ms) >= anim_interval_ms;
+        if (anim_due || !last_leds_on || (mode_index != last_mode_index)) {
+            if (anim_due) {
+                last_anim_ms = nowMs;
+                anim_step++;
+            }
+
+            uint8_t effect_index = mode_index - STATIC_MODE_COUNT;
+            switch (effect_index) {
+                case 0: { // RGB breathing
+                    uint16_t t = (nowMs / 10) % 512;
+                    uint8_t brightness = (t < 256) ? t : 511 - t;
+                    uint8_t hue = (nowMs / 20) & 0xFF;
+                    uint32_t base = color_wheel(hue);
+                    fill_all(scale_color(base, brightness));
+                } break;
+                case 1: { // Rainbow circle
+                    uint8_t offset = anim_step & 0xFF;
+                    for (uint16_t i = 0; i < strip.numPixels(); i++) {
+                        uint8_t hue = (uint8_t)((i * 256 / strip.numPixels() + offset) & 0xFF);
+                        strip.setPixelColor(i, color_wheel(hue));
+                    }
+                } break;
+                case 2: { // Theater chase
+                    uint8_t phase = anim_step % 3;
+                    uint32_t chase = color_wheel((anim_step * 5) & 0xFF);
+                    for (uint16_t i = 0; i < strip.numPixels(); i++) {
+                        if (((i + phase) % 3) == 0) {
+                            strip.setPixelColor(i, chase);
+                        } else {
+                            strip.setPixelColor(i, 0);
+                        }
+                    }
+                } break;
+                case 3: { // Color wipe
+                    uint16_t pos = anim_step % (strip.numPixels() + 1);
+                    uint32_t wipe = color_wheel((anim_step * 3) & 0xFF);
+                    for (uint16_t i = 0; i < strip.numPixels(); i++) {
+                        strip.setPixelColor(i, (i < pos) ? wipe : 0);
+                    }
+                } break;
+                default: { // Twinkle
+                    for (uint16_t i = 0; i < strip.numPixels(); i++) {
+                        uint32_t c = strip.getPixelColor(i);
+                        strip.setPixelColor(i, scale_color(c, 200));
+                    }
+                    for (uint8_t k = 0; k < 2; k++) {
+                        if (random(0, 4) == 0) {
+                            uint16_t idx = random(strip.numPixels());
+                            strip.setPixelColor(idx, color_wheel(random(0, 256)));
+                        }
+                    }
+                } break;
+            }
+            strip.show();
+        }
     }
+
+    last_leds_on = leds_on;
+    last_mode_index = mode_index;
 
     char time_str[9];
     const char *weekday_str = daysOfTheWeek[0];
